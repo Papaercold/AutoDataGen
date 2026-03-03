@@ -1,0 +1,31 @@
+from isaaclab.utils import configclass
+
+from .base_skill import CuroboSkillExtraCfg
+from .gripper import GraspSkill, GraspSkillCfg, UngraspSkill, UngraspSkillCfg
+from .navigate import NavigateSkill, NavigateSkillCfg, NavigateSkillExtraCfg
+from .reach import ReachSkill, ReachSkillCfg
+from .relative_reach import (
+    LiftSkill,
+    LiftSkillCfg,
+    PullSkill,
+    PullSkillCfg,
+    PushSkill,
+    PushSkillCfg,
+)
+
+
+@configclass
+class AutoSimSkillsExtraCfg:
+    """Extra configuration for the AutoSim skills."""
+
+    grasp: GraspSkillCfg = GraspSkillCfg()
+    ungrasp: UngraspSkillCfg = UngraspSkillCfg()
+    lift: LiftSkillCfg = LiftSkillCfg()
+    moveto: NavigateSkillCfg = NavigateSkillCfg()
+    pull: PullSkillCfg = PullSkillCfg()
+    push: PushSkillCfg = PushSkillCfg()
+    reach: ReachSkillCfg = ReachSkillCfg()
+
+    def get(cls, skill_name: str):
+        """Get the skill configuration by name."""
+        return getattr(cls, skill_name)
