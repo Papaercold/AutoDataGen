@@ -3,11 +3,20 @@ You are a robot task planning expert. Analyze the given isaaclab task code and d
 {% if objects %}
 ## CRITICAL: Available Objects in Scene
 **You MUST only use the following object names as target_object in your skill sequence:**
-[{{ objects }}]
+{% for obj in objects %}
+- "{{ obj }}"
+{% endfor %}
 
 **DO NOT invent or use any object names that are not in this list!**
-For example, if you need to refer to a coffee machine, use the exact name from the list above (e.g.,
-"coffee_machine_main_group"), NOT made-up names like "coffee_machine_dispenser".
+{% endif %}
+
+{% if code_name_to_scene_key %}
+## CRITICAL: Code Name → Scene Key Mapping
+The task source code uses Python attribute names that differ from the actual scene keys.
+**Always use the scene key (right side) as target_object, never the code name (left side):**
+{% for code_name, scene_key in code_name_to_scene_key.items() %}
+- `{{ code_name }}` → "{{ scene_key }}"
+{% endfor %}
 {% endif %}
 
 ## Available Atomic Skills

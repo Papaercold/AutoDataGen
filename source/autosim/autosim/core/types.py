@@ -75,6 +75,8 @@ class EnvExtraInfo:
     """The objects in the environment."""
     additional_prompt_contents: str | None = None
     """The additional prompt contents for the task decomposition."""
+    code_name_to_scene_key: dict[str, str] | None = None
+    """Mapping from names used in task source code (e.g. 'self.microwave', 'kettle') to actual scene keys (e.g. 'microwave_main_group', 'obj'). Passed to LLM to prevent hallucination."""
 
     robot_name: str = "robot"
     """The name of the robot in the scene."""

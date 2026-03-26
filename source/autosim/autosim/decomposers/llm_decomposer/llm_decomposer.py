@@ -83,19 +83,24 @@ class LLMDecomposer(Decomposer):
         prompt = self._build_prompt(task_code, extra_info)
         self._logger.debug(f"prompt for llm composer: \n{prompt}")
 
-        self._logger.info("generate response from llm...")
-        response = self._llm_backend.generate(
-            prompt=prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
-        )
+        available_objects = set(extra_info.objects) if extra_info.objects else set()
+        last_error = None
 
-        # parse json response
-        try:
-            results = self._extract_json(response)
-            self._validate_result(results)
+        for attempt in range(1, self.cfg.max_retries + 1):
+            self._logger.info(f"generate response from llm... (attempt {attempt}/{self.cfg.max_retries})")
+            response = self._llm_backend.generate(
+                prompt=prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
+            )
 
-            return from_dict(DecomposeResult, results)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse JSON response: {e}\nResponse: {response}")
+            try:
+                results = self._extract_json(response)
+                self._validate_result(results, available_objects)
+                return from_dict(DecomposeResult, results)
+            except (json.JSONDecodeError, ValueError) as e:
+                last_error = e
+                self._logger.warning(f"Attempt {attempt} failed: {e}")
+
+        raise ValueError(f"Decomposition failed after {self.cfg.max_retries} attempts. Last error: {last_error}")
 
     def _load_task_code(self, task_name: str) -> str:
         """
@@ -170,6 +175,7 @@ class LLMDecomposer(Decomposer):
             task_name=extra_info.task_name,
             skills=skills,
             objects=extra_info.objects,
+            code_name_to_scene_key=extra_info.code_name_to_scene_key,
             additional_prompt_contents=extra_info.additional_prompt_contents,
         )
 
@@ -202,7 +208,7 @@ class LLMDecomposer(Decomposer):
 
         raise json.JSONDecodeError("No valid JSON found in response", response, 0)
 
-    def _validate_result(self, result: dict) -> None:
+    def _validate_result(self, result: dict, available_objects: set | None = None) -> None:
         """
         Validate decomposition result structure
 
@@ -230,8 +236,14 @@ class LLMDecomposer(Decomposer):
             if field not in result:
                 raise ValueError(f"Missing required field: {field}")
 
-        # Validate skill types
+        # Validate skill types and target objects
         for subtask in result["subtasks"]:
             for skill in subtask["skills"]:
                 if skill["skill_type"] not in self._atomic_skills:
                     raise ValueError(f"Invalid skill type: {skill['skill_type']}. Must be one of {self._atomic_skills}")
+                if available_objects and skill.get("target_type") != "position":
+                    if skill["target_object"] not in available_objects:
+                        raise ValueError(
+                            f"target_object '{skill['target_object']}' does not exist in scene. "
+                            f"Available: {sorted(available_objects)}"
+                        )
