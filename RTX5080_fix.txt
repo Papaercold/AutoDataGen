@@ -1,0 +1,43 @@
+RTX 5080 (Blackwell, sm_120) cuRobo 兼容性修复
+================================================
+
+问题：cuRobo 的自定义 CUDA kernel 使用了 __ballot_sync(0xffffffff, ...)，
+      在 Blackwell 架构上当线程数不足 32 时会触发非法内存访问崩溃。
+
+修改列表：
+
+1. dependencies/curobo/src/curobo/curobolib/cpp/kinematics_fused_kernel.cu
+   - Line 830: __ballot_sync(0xffffffff, ...) -> __ballot_sync(__activemask(), ...)
+
+2. dependencies/curobo/src/curobo/curobolib/cpp/self_collision_kernel.cu
+   - Line 225, 231, 425, 432: 同上，共 4 处
+
+3. dependencies/curobo/src/curobo/content/configs/task/*.yml (6个文件)
+   - use_cuda_kernel: False
+   - use_cuda_line_search_kernel: False
+   - use_cuda_update_best_kernel: False
+   涉及：gradient_ik, gradient_ik_autotune, gradient_mpc, gradient_trajopt,
+         finetune_trajopt, finetune_trajopt_slow
+
+4. dependencies/curobo/src/curobo/opt/newton/lbfgs.py
+   - use_cuda_kernel: bool = False
+   - use_shared_buffers_kernel: bool = False
+
+5. dependencies/curobo/src/curobo/util/torch_utils.py
+   - get_torch_jit_decorator() 直接返回空装饰器，禁用 torch.compile/jit.script
+
+6. source/autosim/autosim/capabilities/motion_planning/curobo/curobo_planner_cfg.py
+   - use_cuda_graph: bool = False
+
+7. source/autosim/autosim/capabilities/motion_planning/curobo/curobo_planner.py
+   - warmup(enable_graph=True) -> warmup(enable_graph=False)
+
+重新编译命令：
+   CUDA_HOME=/home/zihan-gao/miniforge3/envs/AutoDataGen \
+   PATH=/home/zihan-gao/miniforge3/envs/AutoDataGen/bin:$PATH \
+   CPATH=/home/zihan-gao/miniforge3/envs/AutoDataGen/targets/x86_64-linux/include:$CPATH \
+   TORCH_CUDA_ARCH_LIST="12.0" \
+   pip install -e dependencies/curobo --no-build-isolation
+
+注：修改 1-2 需重新编译 cuRobo；修改 3-7 无需重新编译。
+    所有修改均不改变功能逻辑，仅影响性能（略有下降）。
