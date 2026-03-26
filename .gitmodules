@@ -3,4 +3,4 @@
 	url = https://github.com/isaac-sim/IsaacLab.git
 [submodule "dependencies/curobo"]
 	path = dependencies/curobo
-	url = https://github.com/NVlabs/curobo.git
+	url = git@github.com:Papaercold/curobo.git
