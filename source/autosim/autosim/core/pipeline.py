@@ -55,6 +55,15 @@ class AutoSimPipeline(ABC):
         self.cfg = cfg
         self._logger = AutoSimLogger("AutoSimPipeline")
 
+        self._initialized = False
+
+    def initialize(self) -> None:
+        """Initialize the AutoSim pipeline."""
+
+        if self._initialized:
+            return
+
+        # initialize the decomposer
         self._decomposer: Decomposer = self.cfg.decomposer.class_type(self.cfg.decomposer)
 
         # load the environment and extra information
@@ -87,8 +96,14 @@ class AutoSimPipeline(ABC):
         # save generated actions
         self._generated_actions = []
 
+        # set the initialized flag
+        self._initialized = True
+
     def run(self) -> PipelineOutput:
         """Run the AutoSim pipeline."""
+
+        # initialize the pipeline
+        self.initialize()
 
         # decompose the task with cache hit check
         decompose_result: DecomposeResult = self.decompose()
@@ -114,6 +129,7 @@ class AutoSimPipeline(ABC):
         """Reset the environment."""
 
         self._env.reset()
+        self._env_extra_info.reset()
 
     def decompose(self) -> DecomposeResult:
         """Decompose the task."""
