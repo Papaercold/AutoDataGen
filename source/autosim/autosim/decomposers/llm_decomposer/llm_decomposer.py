@@ -81,7 +81,6 @@ class LLMDecomposer(Decomposer):
 
         task_code = self._load_task_code(extra_info.task_name)
         prompt = self._build_prompt(task_code, extra_info)
-        self._logger.debug(f"prompt for llm composer: \n{prompt}")
 
         available_objects = set(extra_info.objects) if extra_info.objects else set()
         last_error = None
@@ -91,6 +90,9 @@ class LLMDecomposer(Decomposer):
             response = self._llm_backend.generate(
                 prompt=prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
             )
+
+            if self._debug_output_dir:
+                self._write_debug(extra_info.task_name, attempt, prompt, response)
 
             try:
                 results = self._extract_json(response)
@@ -178,6 +180,16 @@ class LLMDecomposer(Decomposer):
             code_name_to_scene_key=extra_info.code_name_to_scene_key,
             additional_prompt_contents=extra_info.additional_prompt_contents,
         )
+
+    def _write_debug(self, task_name: str, attempt: int, prompt: str, response: str) -> None:
+        """Write prompt and LLM response to debug_output_dir for inspection."""
+
+        suffix = "" if attempt == 1 else f"_attempt{attempt}"
+        prompt_path = self._debug_output_dir / f"{task_name}{suffix}_prompt.txt"
+        response_path = self._debug_output_dir / f"{task_name}{suffix}_response.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        response_path.write_text(response, encoding="utf-8")
+        self._logger.info(f"Debug files written to {self._debug_output_dir} (attempt {attempt})")
 
     def _extract_json(self, response: str) -> dict:
         """

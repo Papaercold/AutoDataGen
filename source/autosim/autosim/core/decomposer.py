@@ -21,12 +21,18 @@ class DecomposerCfg:
     cache_dir: str = "~/.cache/autosim/decomposer_cache"
     """The cache directory for the decomposer."""
 
+    debug_output_dir: str | None = None
+    """If set, decomposition results are also written to this directory as {task_name}.json. Useful for debugging."""
+
 
 class Decomposer(ABC):
     def __init__(self, cfg: DecomposerCfg) -> None:
         self.cfg = cfg
         self._cache_dir = Path(self.cfg.cache_dir).expanduser()
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._debug_output_dir = Path(self.cfg.debug_output_dir).expanduser() if self.cfg.debug_output_dir else None
+        if self._debug_output_dir:
+            self._debug_output_dir.mkdir(parents=True, exist_ok=True)
         self._logger = AutoSimLogger("Decomposer")
 
     @abstractmethod
@@ -42,8 +48,14 @@ class Decomposer(ABC):
     def write_cache(self, task_name: str, decompose_result: DecomposeResult) -> None:
         """Write the cache for the given task name."""
 
+        data = asdict(decompose_result)
         with open(self._cache_dir / f"{task_name}.json", "w") as f:
-            json.dump(asdict(decompose_result), f, indent=4)
+            json.dump(data, f, indent=4)
+        if self._debug_output_dir:
+            debug_path = self._debug_output_dir / f"{task_name}.json"
+            with open(debug_path, "w") as f:
+                json.dump(data, f, indent=4)
+            self._logger.info(f"Decomposition result written to {debug_path}")
 
     def read_cache(self, task_name: str) -> DecomposeResult:
         """Read the cache for the given task name."""
