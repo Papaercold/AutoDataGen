@@ -55,8 +55,15 @@ class CuroboPlannerCfg:
     world_ignore_subffixes: list[str] | None = None
     """List of subffixes to ignore when extracting world obstacles."""
 
+    # World update strategy (A-scope migration from lwautosim/collide-align)
+    enable_update_world_before_plan: bool = False
+    """If True, rebuild world obstacles from USD before every planning call (accurate but slower)."""
+    enable_dynamic_world_sync: bool = False
+    """If True, synchronize dynamic object poses into cuRobo world before planning (fast incremental update)."""
+
     # Debug and visualization
     debug_planner: bool = False
     """Enable detailed motion planning debug information."""
     cuda_device: int | None = 0
     """Preferred CUDA device index; None uses torch.cuda.current_device() (respects CUDA_VISIBLE_DEVICES)."""
+
