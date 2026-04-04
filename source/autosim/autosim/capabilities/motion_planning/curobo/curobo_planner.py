@@ -85,6 +85,7 @@ class CuroboPlanner:
             enable_graph_attempt=self.cfg.enable_graph_attempt,
             max_attempts=self.cfg.max_planning_attempts,
             time_dilation_factor=self.cfg.time_dilation_factor,
+            partial_ik_opt=self.cfg.partial_ik_opt,
         )
 
         # Create USD helper
@@ -498,6 +499,80 @@ class CuroboPlanner:
                 for ee_name, poses in link_goals.items()
             }
         return self.motion_gen.ik_solver.solve_batch(goal, link_poses=link_poses)
+
+    def plan_to_joint_config(
+        self,
+        target_q: torch.Tensor,
+        current_q: torch.Tensor,
+        current_qd: torch.Tensor | None = None,
+    ) -> JointState | None:
+        """Plan a joint-space trajectory to a target joint configuration.
+
+        Unlike plan_motion which targets a Cartesian pose, this plans directly
+        in joint space using cuRobo's plan_single_js. Used by RetractSkill to
+        move the robot to a predefined retract configuration.
+
+        Args:
+            target_q: Target joint positions, shape [dof].
+            current_q: Current joint positions, shape [dof].
+            current_qd: Current joint velocities, shape [dof]. Defaults to zeros.
+
+        Returns:
+            JointState of the trajectory or None if planning failed.
+        """
+
+        if current_qd is None:
+            current_qd = torch.zeros_like(current_q)
+
+        dof_needed = len(self.target_joint_names)
+        for name, q in [("current_q", current_q), ("target_q", target_q)]:
+            if len(q) < dof_needed:
+                pad = torch.zeros(dof_needed - len(q), dtype=q.dtype)
+                q = torch.concatenate([q, pad], axis=0)
+            elif len(q) > dof_needed:
+                q = q[:dof_needed]
+            if name == "current_q":
+                current_q = q
+            else:
+                target_q = q
+
+        if len(current_qd) < dof_needed:
+            current_qd = torch.concatenate([current_qd, torch.zeros(dof_needed - len(current_qd), dtype=current_qd.dtype)])
+        elif len(current_qd) > dof_needed:
+            current_qd = current_qd[:dof_needed]
+
+        start_state = JointState(
+            position=self._to_curobo_device(current_q),
+            velocity=self._to_curobo_device(current_qd) * 0.0,
+            acceleration=self._to_curobo_device(current_qd) * 0.0,
+            jerk=self._to_curobo_device(current_qd) * 0.0,
+            joint_names=self.target_joint_names,
+        )
+        goal_state = JointState(
+            position=self._to_curobo_device(target_q),
+            velocity=self._to_curobo_device(torch.zeros_like(target_q)),
+            acceleration=self._to_curobo_device(torch.zeros_like(target_q)),
+            jerk=self._to_curobo_device(torch.zeros_like(target_q)),
+            joint_names=self.target_joint_names,
+        )
+
+        start_state = start_state.get_ordered_joint_state(self.target_joint_names)
+        goal_state = goal_state.get_ordered_joint_state(self.target_joint_names)
+
+        result = self.motion_gen.plan_single_js(
+            start_state.unsqueeze(0),
+            goal_state.unsqueeze(0),
+            self.plan_config.clone(),
+        )
+
+        if result.success.item():
+            current_plan = result.get_interpolated_plan()
+            motion_plan = current_plan.get_ordered_joint_state(self.target_joint_names)
+            self._logger.debug(f"joint-space planning succeeded with {len(motion_plan.position)} waypoints")
+            return motion_plan
+        else:
+            self._logger.warning(f"joint-space planning failed: {result.status}")
+            return None
 
     def reset(self):
         """reset the planner state"""

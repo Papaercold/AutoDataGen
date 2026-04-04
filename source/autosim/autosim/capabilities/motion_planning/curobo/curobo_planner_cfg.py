@@ -46,6 +46,8 @@ class CuroboPlannerCfg:
     """Maximum number of planning attempts."""
     time_dilation_factor: float = 0.5
     """Time dilation factor for planning."""
+    partial_ik_opt: bool = True
+    """If True, allow partial IK solutions when full planning fails, returning the closest reachable pose."""
 
     # Optional prim path configuration
     robot_prim_path: str | None = None
