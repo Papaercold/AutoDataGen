@@ -8,6 +8,7 @@ import torch
 from curobo.cuda_robot_model.util import load_robot_yaml
 
 from curobo.geom.types import WorldConfig
+from curobo.rollout.cost.pose_cost import PoseCostMetric
 from curobo.types.base import TensorDeviceType
 from curobo.types.file_path import ContentPath
 from curobo.types.math import Pose
@@ -85,7 +86,6 @@ class CuroboPlanner:
             enable_graph_attempt=self.cfg.enable_graph_attempt,
             max_attempts=self.cfg.max_planning_attempts,
             time_dilation_factor=self.cfg.time_dilation_factor,
-            partial_ik_opt=self.cfg.partial_ik_opt,
         )
 
         # Create USD helper
@@ -350,17 +350,43 @@ class CuroboPlanner:
                 for link_name, pose in link_goals.items()
             }
 
+        # Build per-call plan config: clone only when we need to attach a pose_cost_metric
+        # so the shared self.plan_config is never mutated.
+        if self.cfg.reach_partial_pose_weight is not None:
+            weights = torch.tensor(
+                self.cfg.reach_partial_pose_weight,
+                device=self.tensor_args.device,
+                dtype=self.tensor_args.dtype,
+            )
+            pose_metric = PoseCostMetric(reach_partial_pose=True, reach_vec_weight=weights)
+            active_plan_config = self.plan_config.clone()
+            active_plan_config.pose_cost_metric = pose_metric
+            self._logger.debug(f"reach_partial_pose_weight applied: {self.cfg.reach_partial_pose_weight}")
+        else:
+            active_plan_config = self.plan_config
+
         # execute planning
         result = self.motion_gen.plan_single(
             current_joint_state.unsqueeze(0),
             goal,
-            self.plan_config,
+            active_plan_config,
             link_poses=link_poses,
         )
 
         if result.success.item():
             current_plan = result.get_interpolated_plan()
             motion_plan = current_plan.get_ordered_joint_state(self.target_joint_names)
+
+            # Freeze specified joints: override every timestep with the start value so those
+            # joints remain physically stationary throughout the trajectory.
+            if self.cfg.trajectory_freeze_joints:
+                curobo_q = self._to_curobo_device(current_q)
+                for joint_name in self.cfg.trajectory_freeze_joints:
+                    if joint_name in self.target_joint_names:
+                        idx = list(self.target_joint_names).index(joint_name)
+                        motion_plan.position[:, idx] = curobo_q[idx]
+                    else:
+                        self._logger.warning(f"trajectory_freeze_joints: '{joint_name}' not in planner joints, skipped")
 
             self._logger.debug(f"planning succeeded with {len(motion_plan.position)} waypoints")
             return motion_plan
