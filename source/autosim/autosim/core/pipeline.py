@@ -239,8 +239,19 @@ class AutoSimPipeline(ABC):
         objects_dict = dict()
         for obj_name in self._env.scene.keys():
             obj = self._env.scene[obj_name]
-            if hasattr(obj, "data") and hasattr(obj.data, "root_pose_w") and obj_name != self._robot_name:
+            if obj_name == self._robot_name:
+                continue
+            if hasattr(obj, "data") and hasattr(obj.data, "root_pose_w"):
                 objects_dict[obj_name] = obj.data.root_pose_w[self._env_id]
+            elif hasattr(obj, "prims"):
+                # Static XFormPrim — read pose from USD transform
+                from pxr import UsdGeom
+                import torch as _torch
+                xform = UsdGeom.Xformable(obj.prims[0])
+                t = xform.ComputeLocalToWorldTransform(0)
+                pos = _torch.tensor([t[3][0], t[3][1], t[3][2]], dtype=torch.float32)
+                quat = _torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32)  # identity, orientation not needed for navigation
+                objects_dict[obj_name] = _torch.cat([pos, quat])
 
         return WorldState(
             robot_joint_pos=robot_joint_pos,

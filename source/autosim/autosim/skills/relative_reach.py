@@ -62,7 +62,7 @@ class RelativeReachSkill(ReachSkill):
     ) -> SkillGoal:
         """Return the target object of the relative reach skill."""
 
-        return SkillGoal(target_object=skill_info.target_object)
+        return SkillGoal(target_object=skill_info.target_object, arm=skill_info.arm)
 
     def execute_plan(self, state: WorldState, goal: SkillGoal) -> bool:
         """Execute the plan of the relative reach skill."""
@@ -70,7 +70,7 @@ class RelativeReachSkill(ReachSkill):
         full_sim_joint_names = state.sim_joint_names
         full_sim_q = state.robot_joint_pos
         full_sim_qd = state.robot_joint_vel
-        planner_activate_joints = self._planner.target_joint_names
+        planner_activate_joints = self._planner.get_joint_names(goal.arm)
 
         activate_q, activate_qd = [], []
         for joint_name in planner_activate_joints:
@@ -124,6 +124,7 @@ class RelativeReachSkill(ReachSkill):
             target_quat,
             activate_q,
             activate_qd,
+            arm=goal.arm,
         )
 
         return self._trajectory is not None

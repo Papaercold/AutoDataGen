@@ -47,6 +47,8 @@ class SkillGoal:
     """The target pose of the skill."""
     extra_target_poses: dict[str, torch.Tensor] | None = None
     """The target poses of the extra end-effectors. dict[link_name, target_pose]."""
+    arm: str = "both"
+    """Which arm to use for planning: 'left', 'right', or 'both'."""
 
 
 @dataclass
@@ -84,6 +86,8 @@ class EnvExtraInfo:
     ee_link_name: str = "ee_link"
     """The name of the end-effector link."""
 
+    graspable_objects: list[str] = field(default_factory=list)
+    """Objects that can be grasped/ungrasped."""
     object_reach_target_poses: dict[str, list[torch.Tensor]] = field(default_factory=dict)
     """The reach target poses in the objects frame. each object can have a list of reach target poses [x, y, z, qw, qx, qy, qz] in the order of execution."""
     object_extra_reach_target_poses: dict[str, dict[str, list[torch.Tensor]]] = field(default_factory=dict)
@@ -114,7 +118,8 @@ class EnvExtraInfo:
         }
 
     def _build_iterator(self, value_list: list[torch.Tensor]) -> Iterator[torch.Tensor]:
-        yield from value_list
+        from itertools import cycle
+        yield from cycle(value_list)
 
     def get_next_reach_target_pose(self, object_name: str) -> torch.Tensor:
         return next(self._object_reach_target_poses_iterator_dict[object_name])
@@ -209,6 +214,8 @@ class SkillInfo:
     """The type of the target. "object", "fixture", "interactive_element", or "position"."""
     description: str
     """The description of the skill."""
+    arm: str = "both"
+    """Which arm to use: 'left', 'right', or 'both'."""
 
 
 @dataclass

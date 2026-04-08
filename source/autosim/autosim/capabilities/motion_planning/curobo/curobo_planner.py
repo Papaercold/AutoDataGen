@@ -30,6 +30,28 @@ if TYPE_CHECKING:
     from .curobo_planner_cfg import CuroboPlannerCfg
 
 
+# Joints belonging to each arm (non-gripper; grippers are already locked in yml)
+_ARM_JOINTS: dict[str, frozenset] = {
+    "left": frozenset([
+        "left_shoulder_y", "left_shoulder_x", "left_shoulder_z",
+        "left_elbow_y", "left_elbow_x",
+        "left_wrist_y", "left_wrist_z",
+        "left_gripper1", "left_gripper2",
+    ]),
+    "right": frozenset([
+        "right_shoulder_y", "right_shoulder_x", "right_shoulder_z",
+        "right_elbow_y", "right_elbow_x",
+        "right_wrist_y", "right_wrist_z",
+        "right_gripper1", "right_gripper2",
+    ]),
+}
+# End-effector link per arm
+_ARM_EE_LINK: dict[str, str] = {
+    "left": "link11_tip",
+    "right": "link20_tip",
+}
+
+
 class CuroboPlanner:
     """Motion planner for robot manipulation using cuRobo."""
 
@@ -59,51 +81,27 @@ class CuroboPlanner:
         # Load robot configuration
         self.robot_cfg: dict[str, Any] = self._load_robot_config()
 
-        # Create motion generator
-        world_cfg = WorldConfig()
-        motion_gen_config = MotionGenConfig.load_from_robot_config(
-            self.robot_cfg,
-            world_cfg,
-            self.tensor_args,
-            interpolation_dt=self.cfg.interpolation_dt,
-            collision_checker_type=self.cfg.collision_checker_type,
-            collision_cache=self.cfg.collision_cache,
-            collision_activation_distance=self.cfg.collision_activation_distance,
-            num_trajopt_seeds=self.cfg.num_trajopt_seeds,
-            num_graph_seeds=self.cfg.num_graph_seeds,
-            use_cuda_graph=self.cfg.use_cuda_graph,
-            fixed_iters_trajopt=True,
-            maximum_trajectory_dt=0.5,
-            ik_opt_iters=500,
-        )
-        self.motion_gen: MotionGen = MotionGen(motion_gen_config)
-
-        self.target_joint_names = self.motion_gen.kinematics.joint_names
-
-        # Create plan configuration with parameters from configuration
-        self.plan_config: MotionGenPlanConfig = MotionGenPlanConfig(
-            enable_graph=self.cfg.enable_graph,
-            enable_graph_attempt=self.cfg.enable_graph_attempt,
-            max_attempts=self.cfg.max_planning_attempts,
-            time_dilation_factor=self.cfg.time_dilation_factor,
-        )
+        # Per-arm motion generators (lazily initialized on first use)
+        self._motion_gens: dict[str, MotionGen] = {}
+        self._plan_configs: dict[str, MotionGenPlanConfig] = {}
+        self._arm_joint_names: dict[str, list] = {}
 
         # Create USD helper
         self.usd_helper = UsdHelper()
         self.usd_helper.load_stage(env.scene.stage)
 
-        # Warm up planner
-        self._logger.info("Warming up motion planner...")
-        self.motion_gen.warmup(enable_graph=self.cfg.use_cuda_graph, warmup_js_trajopt=False)
-
-        # Read static world geometry once
-        self._initialize_static_world()
-
-        # Cache for dynamic world synchronization.
+        # Read static world geometry once (needed before per-arm init)
+        self._static_world_config = None
         self._cached_object_mappings: dict[str, str] | None = None
-
-        # Define supported cuRobo primitive types for object discovery and pose synchronization
         self.primitive_types: list[str] = ["mesh", "cuboid", "sphere", "capsule", "cylinder", "voxel", "blox"]
+
+        # Initialize the default "both" planner (preserves backward compatibility)
+        self._ensure_arm_planner("both")
+
+        # Backward-compatible references
+        self.motion_gen: MotionGen = self._motion_gens["both"]
+        self.target_joint_names = self._arm_joint_names["both"]
+        self.plan_config: MotionGenPlanConfig = self._plan_configs["both"]
 
     def _refine_config_from_env(self, env: ManagerBasedEnv):
         """Refine the config from the environment."""
@@ -145,6 +143,95 @@ class CuroboPlanner:
 
             return self.cfg.robot_config_file
 
+    def _make_single_arm_config(self, arm: str) -> dict:
+        """Programmatically build a single-arm robot config from the base yml.
+
+        For arm='left'  : removes right-arm joints from cspace, locks them at 0.0.
+        For arm='right' : removes left-arm joints from cspace, locks them at 0.0.
+        For arm='both'  : returns the base config unchanged.
+        """
+        import copy
+
+        if arm == "both":
+            return self.robot_cfg
+
+        cfg = copy.deepcopy(self.robot_cfg)
+        kin = cfg["robot_cfg"]["kinematics"]
+
+        # Joints to lock (the *inactive* arm)
+        inactive_arm = "right" if arm == "left" else "left"
+        joints_to_lock = _ARM_JOINTS[inactive_arm]
+
+        # Update ee_link and link_names to the active arm
+        kin["ee_link"] = _ARM_EE_LINK[arm]
+        kin["link_names"] = [_ARM_EE_LINK[arm]]
+        kin["extra_collision_spheres"] = {_ARM_EE_LINK[arm]: 100}
+
+        # Rebuild cspace: keep only joints not in joints_to_lock
+        all_joints = list(kin["cspace"]["joint_names"])
+        keep_idx = [i for i, j in enumerate(all_joints) if j not in joints_to_lock]
+        kin["cspace"]["joint_names"] = [all_joints[i] for i in keep_idx]
+        for key in ("retract_config", "null_space_weight", "cspace_distance_weight"):
+            if key in kin["cspace"]:
+                orig = list(kin["cspace"][key])
+                kin["cspace"][key] = [orig[i] for i in keep_idx]
+
+        # Add inactive arm joints to lock_joints (preserve existing values, e.g. grippers)
+        lock = dict(kin.get("lock_joints") or {})
+        for j in joints_to_lock:
+            if j not in lock:
+                lock[j] = 0.0
+        kin["lock_joints"] = lock
+
+        self._logger.info(f"Built single-arm config for '{arm}': {len(kin['cspace']['joint_names'])} planning joints.")
+        return cfg
+
+    def _ensure_arm_planner(self, arm: str) -> None:
+        """Initialize the MotionGen for the given arm if not already done."""
+
+        if arm in self._motion_gens:
+            return
+
+        self._logger.info(f"Initializing motion planner for arm='{arm}'...")
+        arm_cfg = self._make_single_arm_config(arm)
+
+        world_cfg = WorldConfig()
+        motion_gen_config = MotionGenConfig.load_from_robot_config(
+            arm_cfg,
+            world_cfg,
+            self.tensor_args,
+            interpolation_dt=self.cfg.interpolation_dt,
+            collision_checker_type=self.cfg.collision_checker_type,
+            collision_cache=self.cfg.collision_cache,
+            collision_activation_distance=self.cfg.collision_activation_distance,
+            num_trajopt_seeds=self.cfg.num_trajopt_seeds,
+            num_graph_seeds=self.cfg.num_graph_seeds,
+            use_cuda_graph=self.cfg.use_cuda_graph,
+            fixed_iters_trajopt=True,
+            maximum_trajectory_dt=0.5,
+            ik_opt_iters=500,
+        )
+        mg = MotionGen(motion_gen_config)
+        mg.warmup(enable_graph=self.cfg.use_cuda_graph, warmup_js_trajopt=False)
+
+        # Sync world geometry if already initialized
+        if self._static_world_config is not None:
+            mg.update_world(self._static_world_config)
+
+        self._motion_gens[arm] = mg
+        self._arm_joint_names[arm] = list(mg.kinematics.joint_names)
+        self._plan_configs[arm] = MotionGenPlanConfig(
+            enable_graph=self.cfg.enable_graph,
+            enable_graph_attempt=self.cfg.enable_graph_attempt,
+            max_attempts=self.cfg.max_planning_attempts,
+            time_dilation_factor=self.cfg.time_dilation_factor,
+        )
+
+    def get_joint_names(self, arm: str = "both") -> list:
+        """Return the planning joint names for the specified arm."""
+        self._ensure_arm_planner(arm)
+        return self._arm_joint_names[arm]
+
     def _to_curobo_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """Convert tensor to cuRobo device for isolated device management."""
 
@@ -155,7 +242,8 @@ class CuroboPlanner:
 
         world_cfg = self._build_world_config_from_stage()
         self._static_world_config = world_cfg
-        self.motion_gen.update_world(world_cfg)
+        for mg in self._motion_gens.values():
+            mg.update_world(world_cfg)
         self.invalidate_object_mapping_cache()
 
     def _build_world_config_from_stage(self) -> WorldConfig:
@@ -288,6 +376,7 @@ class CuroboPlanner:
         current_q: torch.Tensor,
         current_qd: torch.Tensor | None = None,
         link_goals: dict[str, torch.Tensor] | None = None,
+        arm: str = "both",
     ) -> JointState | None:
         """
         Plan a trajectory to reach a target pose from a current joint state.
@@ -298,10 +387,17 @@ class CuroboPlanner:
             current_q: Current joint positions
             current_qd: Current joint velocities
             link_goals: Optional dictionary mapping link names to target poses for other links
+            arm: Which arm to plan for — 'left', 'right', or 'both'.
 
         Returns:
             JointState of the trajectory or None if planning failed
         """
+
+        # Ensure the per-arm planner is ready (lazy init)
+        self._ensure_arm_planner(arm)
+        motion_gen = self._motion_gens[arm]
+        plan_config_base = self._plan_configs[arm]
+        target_joint_names = self._arm_joint_names[arm]
 
         # A-scope migration:
         # - Optional full USD world rebuild before planning (accurate, expensive).
@@ -313,7 +409,7 @@ class CuroboPlanner:
 
         if current_qd is None:
             current_qd = torch.zeros_like(current_q)
-        dof_needed = len(self.target_joint_names)
+        dof_needed = len(target_joint_names)
 
         # adjust the joint number
         if len(current_q) < dof_needed:
@@ -326,7 +422,7 @@ class CuroboPlanner:
 
         # Clamp start state to joint limits to avoid INVALID_START_STATE_JOINT_LIMITS.
         # joint_limits.position shape: [2, n_joints], row 0 = lower, row 1 = upper.
-        joint_limits = self.motion_gen.kinematics.get_joint_limits()
+        joint_limits = motion_gen.kinematics.get_joint_limits()
         q_lo = joint_limits.position[0]
         q_hi = joint_limits.position[1]
         current_q = torch.clamp(self._to_curobo_device(current_q), q_lo, q_hi).to(current_q.device)
@@ -343,10 +439,10 @@ class CuroboPlanner:
             velocity=self._to_curobo_device(current_qd) * 0.0,
             acceleration=self._to_curobo_device(current_qd) * 0.0,
             jerk=self._to_curobo_device(current_qd) * 0.0,
-            joint_names=self.target_joint_names,
+            joint_names=target_joint_names,
         )
 
-        current_joint_state: JointState = state.get_ordered_joint_state(self.target_joint_names)
+        current_joint_state: JointState = state.get_ordered_joint_state(target_joint_names)
 
         # Prepare link_poses for multi-arm robots
         link_poses = None
@@ -358,7 +454,7 @@ class CuroboPlanner:
             }
 
         # Build per-call plan config: clone only when we need to attach a pose_cost_metric
-        # so the shared self.plan_config is never mutated.
+        # so the shared plan_config_base is never mutated.
         if self.cfg.reach_partial_pose_weight is not None:
             weights = torch.tensor(
                 self.cfg.reach_partial_pose_weight,
@@ -366,14 +462,14 @@ class CuroboPlanner:
                 dtype=self.tensor_args.dtype,
             )
             pose_metric = PoseCostMetric(reach_partial_pose=True, reach_vec_weight=weights)
-            active_plan_config = self.plan_config.clone()
+            active_plan_config = plan_config_base.clone()
             active_plan_config.pose_cost_metric = pose_metric
             self._logger.debug(f"reach_partial_pose_weight applied: {self.cfg.reach_partial_pose_weight}")
         else:
-            active_plan_config = self.plan_config
+            active_plan_config = plan_config_base
 
         # execute planning
-        result = self.motion_gen.plan_single(
+        result = motion_gen.plan_single(
             current_joint_state.unsqueeze(0),
             goal,
             active_plan_config,
@@ -382,15 +478,15 @@ class CuroboPlanner:
 
         if result.success.item():
             current_plan = result.get_interpolated_plan()
-            motion_plan = current_plan.get_ordered_joint_state(self.target_joint_names)
+            motion_plan = current_plan.get_ordered_joint_state(target_joint_names)
 
             # Freeze specified joints: override every timestep with the start value so those
             # joints remain physically stationary throughout the trajectory.
             if self.cfg.trajectory_freeze_joints:
                 curobo_q = self._to_curobo_device(current_q)
                 for joint_name in self.cfg.trajectory_freeze_joints:
-                    if joint_name in self.target_joint_names:
-                        idx = list(self.target_joint_names).index(joint_name)
+                    if joint_name in target_joint_names:
+                        idx = list(target_joint_names).index(joint_name)
                         motion_plan.position[:, idx] = curobo_q[idx]
                     else:
                         self._logger.warning(f"trajectory_freeze_joints: '{joint_name}' not in planner joints, skipped")

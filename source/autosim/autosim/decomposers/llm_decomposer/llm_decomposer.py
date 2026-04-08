@@ -86,22 +86,31 @@ class LLMDecomposer(Decomposer):
         max_retries = self.cfg.max_decompose_retries
         last_error: Exception | None = None
         valid_objects = set(extra_info.objects) if extra_info.objects else None
+        valid_reach_objects = set(extra_info.object_reach_target_poses.keys()) if extra_info.object_reach_target_poses else None
+        valid_grasp_objects = set(extra_info.graspable_objects) if extra_info.graspable_objects else None
+        retry_prompt = prompt
 
         for attempt in range(1, max_retries + 1):
             self._logger.info(f"generate response from llm (attempt {attempt}/{max_retries})...")
             response = self._llm_backend.generate(
-                prompt=prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
+                prompt=retry_prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
             )
 
+            self._logger.info(f"LLM response (attempt {attempt}):\n{response}")
             try:
                 results = self._extract_json(response)
-                self._validate_result(results, valid_objects)
+                self._validate_result(results, valid_objects, valid_reach_objects, valid_grasp_objects)
                 return from_dict(DecomposeResult, results)
             except (json.JSONDecodeError, ValueError) as e:
                 last_error = e
                 self._logger.warning(f"Decomposition attempt {attempt} failed: {e}")
                 if attempt < max_retries:
                     self._logger.info("Retrying...")
+                    retry_prompt = (
+                        prompt
+                        + f"\n\n## Previous attempt failed with error:\n{e}"
+                        + "\n\nPlease fix the error and output the corrected JSON."
+                    )
 
         raise ValueError(f"Decomposition failed after {max_retries} attempts. Last error: {last_error}")
 
@@ -173,12 +182,26 @@ class LLMDecomposer(Decomposer):
 
         skills = {skill_cfg.name: skill_cfg.description for skill_cfg in SkillRegistry.list_skills()}
 
+        # Auto-generate task constraints from metadata
+        constraints = []
+        if extra_info.object_reach_target_poses:
+            reach_targets = sorted(extra_info.object_reach_target_poses.keys())
+            constraints.append(f"- `reach` skill can ONLY target: {reach_targets}. Do NOT use reach on any other object.")
+        if extra_info.graspable_objects:
+            constraints.append(f"- `grasp`/`ungrasp` skills can ONLY target graspable objects: {sorted(extra_info.graspable_objects)}.")
+        if extra_info.objects:
+            constraints.append(f"- Use EXACTLY these object/fixture names (do not shorten or guess): {sorted(extra_info.objects)}")
+
+        additional = extra_info.additional_prompt_contents or ""
+        if constraints:
+            additional += "\n\n## Task Constraints (auto-generated, MUST follow)\n" + "\n".join(constraints)
+
         return self._prompt_template.render(
             task_code=task_code,
             task_name=extra_info.task_name,
             skills=skills,
             objects=extra_info.objects,
-            additional_prompt_contents=extra_info.additional_prompt_contents,
+            additional_prompt_contents=additional,
         )
 
     def _extract_json(self, response: str) -> dict:
@@ -210,14 +233,15 @@ class LLMDecomposer(Decomposer):
 
         raise json.JSONDecodeError("No valid JSON found in response", response, 0)
 
-    def _validate_result(self, result: dict, valid_objects: set | None = None) -> None:
+    def _validate_result(self, result: dict, valid_objects: set | None = None, valid_reach_objects: set | None = None, valid_grasp_objects: set | None = None) -> None:
         """
         Validate decomposition result structure
 
         Args:
             result: Decomposition result dictionary
-            valid_objects: Set of valid object names from the scene. If provided, target_object
-                fields are checked against this set (skills without a target, e.g. retract, are skipped).
+            valid_objects: Set of valid object names from the scene.
+            valid_reach_objects: Set of object names that have reach target poses configured.
+            valid_grasp_objects: Set of object names that are graspable.
 
         Raises:
             ValueError: If validation fails
@@ -241,7 +265,7 @@ class LLMDecomposer(Decomposer):
                 raise ValueError(f"Missing required field: {field}")
 
         # Validate skill types and target objects
-        no_target_skills = {"retract"}
+        no_target_skills = {"retract", "lift", "push", "pull"}
         for subtask in result["subtasks"]:
             for skill in subtask["skills"]:
                 if skill["skill_type"] not in self._atomic_skills:
@@ -252,4 +276,18 @@ class LLMDecomposer(Decomposer):
                         raise ValueError(
                             f"Invalid target_object '{target}' for skill '{skill['skill_type']}'. "
                             f"Must be one of: {sorted(valid_objects)}"
+                        )
+                if valid_reach_objects is not None and skill["skill_type"] == "reach":
+                    target = skill.get("target_object", "")
+                    if target and target not in valid_reach_objects:
+                        raise ValueError(
+                            f"Invalid target_object '{target}' for skill 'reach'. "
+                            f"reach is only supported for: {sorted(valid_reach_objects)}"
+                        )
+                if valid_grasp_objects is not None and skill["skill_type"] in {"grasp", "ungrasp"}:
+                    target = skill.get("target_object", "")
+                    if target and target not in valid_grasp_objects:
+                        raise ValueError(
+                            f"Invalid target_object '{target}' for skill '{skill['skill_type']}'. "
+                            f"graspable objects are: {sorted(valid_grasp_objects)}"
                         )

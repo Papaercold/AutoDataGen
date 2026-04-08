@@ -120,8 +120,9 @@ class ReachSkill(CuroboSkillBase):
         self._saved_target_object = target_object
         self._saved_reach_offset = reach_target_pose  # [7] in object frame
         self._saved_extra_offsets = extra_offsets
+        self._saved_arm = skill_info.arm
 
-        return SkillGoal(target_object=target_object, target_pose=target_pose, extra_target_poses=extra_target_poses)
+        return SkillGoal(target_object=target_object, target_pose=target_pose, extra_target_poses=extra_target_poses, arm=skill_info.arm)
 
     def _compute_corrective_goal(self) -> SkillGoal | None:
         """Re-compute reach goal using the object's current actual pose.
@@ -188,7 +189,7 @@ class ReachSkill(CuroboSkillBase):
         full_sim_joint_names = state.sim_joint_names
         full_sim_q = state.robot_joint_pos
         full_sim_qd = state.robot_joint_vel
-        planner_activate_joints = self._planner.target_joint_names
+        planner_activate_joints = self._planner.get_joint_names(goal.arm)
 
         activate_q, activate_qd = [], []
         for joint_name in planner_activate_joints:
@@ -207,6 +208,7 @@ class ReachSkill(CuroboSkillBase):
             activate_q,
             activate_qd,
             link_goals=goal.extra_target_poses,
+            arm=goal.arm,
         )
 
         return self._trajectory is not None

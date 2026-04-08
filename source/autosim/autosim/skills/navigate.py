@@ -87,8 +87,15 @@ class NavigateSkill(Skill):
             raise ValueError(f"Object {target_object_name} not found in scene")
         target_object = env.scene[target_object_name]
 
-        obj_pos_w = target_object.data.root_pos_w[0].cpu().numpy()
-        self._logger.info(f"Object pose in world frame: {target_object.data.root_pose_w[0]}")
+        if hasattr(target_object, "data") and hasattr(target_object.data, "root_pos_w"):
+            obj_pos_w = target_object.data.root_pos_w[0].cpu().numpy()
+            self._logger.info(f"Object pose in world frame: {target_object.data.root_pose_w[0]}")
+        else:
+            from pxr import UsdGeom
+            xform = UsdGeom.Xformable(target_object.prims[0])
+            transform = xform.ComputeLocalToWorldTransform(0)
+            obj_pos_w = np.array([transform[3][0], transform[3][1], transform[3][2]])
+            self._logger.info(f"Object pose in world frame (XFormPrim): {obj_pos_w}")
 
         is_free = (self._occupancy_map.occupancy_map == 0).cpu().numpy()
         if np.any(is_free):
