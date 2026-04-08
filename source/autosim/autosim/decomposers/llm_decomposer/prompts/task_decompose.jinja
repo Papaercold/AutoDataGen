@@ -10,6 +10,31 @@ For example, if you need to refer to a coffee machine, use the exact name from t
 "coffee_machine_main_group"), NOT made-up names like "coffee_machine_dispenser".
 {% endif %}
 
+{% if reach_targets %}
+## Reach Targets
+`reach` skill can ONLY target the following objects: {{ reach_targets }}
+Do NOT use `reach` on any other object — including interactive_elements.
+{% endif %}
+
+{% if graspable_objects %}
+## Graspable Objects
+`grasp` and `ungrasp` skills can ONLY target: {{ graspable_objects }}
+Do NOT use `grasp` or `ungrasp` on fixtures, interactive_elements, or any other object not in this list — even if the task description seems to require it.
+If a required interaction (e.g. turning a knob) cannot be expressed with the available skills, skip that step entirely.
+{% endif %}
+
+{% if robot_initial_pose %}
+## Initial State
+Robot base position: x={{ robot_initial_pose[0] }}, y={{ robot_initial_pose[1] }}, z={{ robot_initial_pose[2] }}, yaw={{ "%.2f"|format(robot_initial_pose[3]) }} rad
+
+{% if object_initial_poses %}
+Object positions (world frame):
+{% for name, pose in object_initial_poses.items() %}
+- {{ name }}: x={{ pose[0] }}, y={{ pose[1] }}, z={{ pose[2] }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
 ## Available Atomic Skills
 You have {{ skills | length }} atomic skills available:
 {% for name, desc in skills.items() %}
@@ -53,10 +78,23 @@ Output the task decomposition result in JSON format with the following fields:
         - target_object: Target object name (string)
         - target_type: Target type - "object", "fixture", "interactive_element", or "position"
         - description: Step description (string)
-        - arm: Which arm to use - "left", "right", or "both" (string)
+        - arm: Which arm to use — MUST be "left" or "right". See arm selection rules below.
 8. **success_conditions**: List of success conditions
 9. **total_steps**: Total number of steps (integer)
 10. **skill_sequence**: Flattened list of skill types in order (list of strings)
+
+## Arm Selection Rules
+{% if object_initial_poses and robot_initial_pose %}
+Use the initial positions above to decide which arm to use:
+- Compare the object's Y position to the robot's Y position.
+  - Object Y > robot Y → object is to the robot's LEFT → use `"left"`
+  - Object Y < robot Y → object is to the robot's RIGHT → use `"right"`
+- All skills in a single-arm task MUST use the same arm consistently.
+- NEVER use `"both"` unless the task explicitly requires two arms working at the same time.
+{% else %}
+- Choose "left" or "right" based on which side of the robot the target object is likely to be.
+- NEVER use "both" unless the task explicitly requires two arms working simultaneously.
+{% endif %}
 
 ## Decomposition Patterns
 1. **Lift Object Pattern** (for lifting objects off surface):

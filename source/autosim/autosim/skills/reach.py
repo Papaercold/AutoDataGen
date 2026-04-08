@@ -178,6 +178,25 @@ class ReachSkill(CuroboSkillBase):
         self._logger.info(f"corrective_reach: recomputed target at {reach_target_pos_in_env}")
         return SkillGoal(target_object=target_object, target_pose=target_pose, extra_target_poses=extra_target_poses)
 
+    def _extract_arm_joints(self, arm: str, state: WorldState) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract joint positions and velocities for the given arm from the full sim state."""
+
+        full_sim_joint_names = state.sim_joint_names
+        full_sim_q = state.robot_joint_pos
+        full_sim_qd = state.robot_joint_vel
+        planner_joints = self._planner.get_joint_names(arm)
+
+        activate_q, activate_qd = [], []
+        for joint_name in planner_joints:
+            if joint_name in full_sim_joint_names:
+                activate_q.append(full_sim_q[full_sim_joint_names.index(joint_name)])
+                activate_qd.append(full_sim_qd[full_sim_joint_names.index(joint_name)])
+            else:
+                raise ValueError(
+                    f"Joint {joint_name} in planner activate joints is not in the full simulation joint names."
+                )
+        return torch.stack(activate_q), torch.stack(activate_qd)
+
     def execute_plan(self, state: WorldState, goal: SkillGoal) -> bool:
         """Execute the plan of the reach skill."""
 
@@ -186,30 +205,23 @@ class ReachSkill(CuroboSkillBase):
         target_pose = goal.target_pose  # target pose in the robot root frame
         target_pos, target_quat = target_pose[:3], target_pose[3:]
 
-        full_sim_joint_names = state.sim_joint_names
-        full_sim_q = state.robot_joint_pos
-        full_sim_qd = state.robot_joint_vel
-        planner_activate_joints = self._planner.get_joint_names(goal.arm)
-
-        activate_q, activate_qd = [], []
-        for joint_name in planner_activate_joints:
-            if joint_name in full_sim_joint_names:
-                activate_q.append(full_sim_q[full_sim_joint_names.index(joint_name)])
-                activate_qd.append(full_sim_qd[full_sim_joint_names.index(joint_name)])
-            else:
-                raise ValueError(
-                    f"Joint {joint_name} in planner activate joints is not in the full simulation joint names."
-                )
-        activate_q = torch.stack(activate_q, dim=0)
-        activate_qd = torch.stack(activate_qd, dim=0)
+        activate_q, activate_qd = self._extract_arm_joints(goal.arm, state)
         self._trajectory = self._planner.plan_motion(
-            target_pos,
-            target_quat,
-            activate_q,
-            activate_qd,
-            link_goals=goal.extra_target_poses,
-            arm=goal.arm,
+            target_pos, target_quat, activate_q, activate_qd,
+            link_goals=goal.extra_target_poses, arm=goal.arm,
         )
+
+        if self._trajectory is None and goal.arm in ("left", "right"):
+            fallback_arm = "right" if goal.arm == "left" else "left"
+            self._logger.warning(f"Planning failed for arm='{goal.arm}', retrying with arm='{fallback_arm}'...")
+            activate_q, activate_qd = self._extract_arm_joints(fallback_arm, state)
+            # link_goals are arm-specific, skip them for the fallback arm
+            self._trajectory = self._planner.plan_motion(
+                target_pos, target_quat, activate_q, activate_qd,
+                link_goals=None, arm=fallback_arm,
+            )
+            if self._trajectory is not None:
+                goal.arm = fallback_arm  # update so corrective reach uses the same arm
 
         return self._trajectory is not None
 

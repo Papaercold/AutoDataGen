@@ -88,6 +88,10 @@ class EnvExtraInfo:
 
     graspable_objects: list[str] = field(default_factory=list)
     """Objects that can be grasped/ungrasped."""
+    object_initial_poses: dict[str, list[float]] = field(default_factory=dict)
+    """Initial poses of objects in world frame: {name: [x, y, z, qw, qx, qy, qz]}."""
+    robot_initial_pose: list[float] = field(default_factory=list)
+    """Initial pose of the robot base in world frame: [x, y, z, yaw]."""
     object_reach_target_poses: dict[str, list[torch.Tensor]] = field(default_factory=dict)
     """The reach target poses in the objects frame. each object can have a list of reach target poses [x, y, z, qw, qx, qy, qz] in the order of execution."""
     object_extra_reach_target_poses: dict[str, dict[str, list[torch.Tensor]]] = field(default_factory=dict)

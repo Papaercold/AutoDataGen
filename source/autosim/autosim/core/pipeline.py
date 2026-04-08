@@ -96,6 +96,12 @@ class AutoSimPipeline(ABC):
         # save generated actions
         self._generated_actions = []
 
+        # full-size action buffer (action_space dims), used as base for every step
+        self._last_action = torch.zeros(self._env.action_space.shape, device=self._env.device)
+
+        # populate initial poses into env_extra_info for LLM context
+        self._populate_initial_poses()
+
         # set the initialized flag
         self._initialized = True
 
@@ -124,6 +130,36 @@ class AutoSimPipeline(ABC):
         """Get the extra information from the environment."""
 
         raise NotImplementedError(f"{self.__class__.__name__}.get_env_extra_info() must be implemented.")
+
+    def _populate_initial_poses(self) -> None:
+        """Populate object and robot initial poses into env_extra_info for LLM context."""
+
+        from pxr import UsdGeom
+
+        poses = {}
+        for obj_name in self._env.scene.keys():
+            if obj_name == self._robot_name:
+                continue
+            obj = self._env.scene[obj_name]
+            try:
+                if hasattr(obj, "data") and hasattr(obj.data, "root_pose_w"):
+                    pose = obj.data.root_pose_w[self._env_id].tolist()
+                elif hasattr(obj, "prims"):
+                    t = UsdGeom.Xformable(obj.prims[0]).ComputeLocalToWorldTransform(0)
+                    pose = [t[3][0], t[3][1], t[3][2], 1.0, 0.0, 0.0, 0.0]
+                else:
+                    continue
+                poses[obj_name] = [round(v, 3) for v in pose]
+            except Exception:
+                continue
+        self._env_extra_info.object_initial_poses = poses
+
+        robot_base = self._robot.data.body_link_pose_w[self._env_id, self._robot_base_link_idx]
+        w, x, y, z = robot_base[3:7]
+        yaw = float(torch.atan2(2 * (w * z + x * y), 1 - 2 * (y**2 + z**2)))
+        self._env_extra_info.robot_initial_pose = [round(v, 3) for v in [
+            robot_base[0].item(), robot_base[1].item(), robot_base[2].item(), yaw
+        ]]
 
     def reset_env(self) -> None:
         """Reset the environment."""
@@ -201,10 +237,12 @@ class AutoSimPipeline(ABC):
 
             output = skill.step(world_state)
 
-            action = torch.zeros(self._env.action_space.shape, device=self._env.device)
-            action[self._env_id, :] = self._action_adapter.apply(skill, output, self._env)
+            adapter_result = self._action_adapter.apply(skill, output, self._env)
+            action = self._last_action.clone()
+            action[self._env_id, : adapter_result.shape[0]] = adapter_result
 
             self._env.step(action)
+            self._last_action = action
             self._generated_actions.append(action)
 
             steps += 1

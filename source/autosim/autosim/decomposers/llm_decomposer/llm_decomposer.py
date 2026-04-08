@@ -88,9 +88,16 @@ class LLMDecomposer(Decomposer):
         valid_objects = set(extra_info.objects) if extra_info.objects else None
         valid_reach_objects = set(extra_info.object_reach_target_poses.keys()) if extra_info.object_reach_target_poses else None
         valid_grasp_objects = set(extra_info.graspable_objects) if extra_info.graspable_objects else None
-        retry_prompt = prompt
+        error_history: list[str] = []
 
         for attempt in range(1, max_retries + 1):
+            retry_prompt = prompt
+            if error_history:
+                retry_prompt += "\n\n## Previous attempts failed with the following errors (ALL must be fixed):"
+                for i, err in enumerate(error_history, 1):
+                    retry_prompt += f"\n- Attempt {i}: {err}"
+                retry_prompt += "\n\nPlease fix ALL errors above and output the corrected JSON."
+
             self._logger.info(f"generate response from llm (attempt {attempt}/{max_retries})...")
             response = self._llm_backend.generate(
                 prompt=retry_prompt, temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens
@@ -103,14 +110,10 @@ class LLMDecomposer(Decomposer):
                 return from_dict(DecomposeResult, results)
             except (json.JSONDecodeError, ValueError) as e:
                 last_error = e
+                error_history.append(str(e))
                 self._logger.warning(f"Decomposition attempt {attempt} failed: {e}")
                 if attempt < max_retries:
                     self._logger.info("Retrying...")
-                    retry_prompt = (
-                        prompt
-                        + f"\n\n## Previous attempt failed with error:\n{e}"
-                        + "\n\nPlease fix the error and output the corrected JSON."
-                    )
 
         raise ValueError(f"Decomposition failed after {max_retries} attempts. Last error: {last_error}")
 
@@ -182,26 +185,16 @@ class LLMDecomposer(Decomposer):
 
         skills = {skill_cfg.name: skill_cfg.description for skill_cfg in SkillRegistry.list_skills()}
 
-        # Auto-generate task constraints from metadata
-        constraints = []
-        if extra_info.object_reach_target_poses:
-            reach_targets = sorted(extra_info.object_reach_target_poses.keys())
-            constraints.append(f"- `reach` skill can ONLY target: {reach_targets}. Do NOT use reach on any other object.")
-        if extra_info.graspable_objects:
-            constraints.append(f"- `grasp`/`ungrasp` skills can ONLY target graspable objects: {sorted(extra_info.graspable_objects)}.")
-        if extra_info.objects:
-            constraints.append(f"- Use EXACTLY these object/fixture names (do not shorten or guess): {sorted(extra_info.objects)}")
-
-        additional = extra_info.additional_prompt_contents or ""
-        if constraints:
-            additional += "\n\n## Task Constraints (auto-generated, MUST follow)\n" + "\n".join(constraints)
-
         return self._prompt_template.render(
             task_code=task_code,
             task_name=extra_info.task_name,
             skills=skills,
             objects=extra_info.objects,
-            additional_prompt_contents=additional,
+            reach_targets=sorted(extra_info.object_reach_target_poses.keys()) if extra_info.object_reach_target_poses else None,
+            graspable_objects=sorted(extra_info.graspable_objects) if extra_info.graspable_objects else None,
+            robot_initial_pose=extra_info.robot_initial_pose or None,
+            object_initial_poses=extra_info.object_initial_poses or None,
+            additional_prompt_contents=extra_info.additional_prompt_contents,
         )
 
     def _extract_json(self, response: str) -> dict:
@@ -272,7 +265,8 @@ class LLMDecomposer(Decomposer):
                     raise ValueError(f"Invalid skill type: {skill['skill_type']}. Must be one of {self._atomic_skills}")
                 if valid_objects is not None and skill["skill_type"] not in no_target_skills:
                     target = skill.get("target_object", "")
-                    if target and target not in valid_objects:
+                    target_type = skill.get("target_type", "")
+                    if target and target not in valid_objects and target_type != "interactive_element":
                         raise ValueError(
                             f"Invalid target_object '{target}' for skill '{skill['skill_type']}'. "
                             f"Must be one of: {sorted(valid_objects)}"
@@ -286,7 +280,8 @@ class LLMDecomposer(Decomposer):
                         )
                 if valid_grasp_objects is not None and skill["skill_type"] in {"grasp", "ungrasp"}:
                     target = skill.get("target_object", "")
-                    if target and target not in valid_grasp_objects:
+                    target_type = skill.get("target_type", "")
+                    if target and target not in valid_grasp_objects and target_type != "interactive_element":
                         raise ValueError(
                             f"Invalid target_object '{target}' for skill '{skill['skill_type']}'. "
                             f"graspable objects are: {sorted(valid_grasp_objects)}"
