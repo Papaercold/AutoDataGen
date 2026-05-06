@@ -3,10 +3,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
 import torch
 from curobo.cuda_robot_model.util import load_robot_yaml
-
 from curobo.geom.types import WorldConfig
 from curobo.rollout.cost.pose_cost import PoseCostMetric
 from curobo.types.base import TensorDeviceType
@@ -73,6 +71,8 @@ class CuroboPlanner:
             num_trajopt_seeds=self.cfg.num_trajopt_seeds,
             num_graph_seeds=self.cfg.num_graph_seeds,
             use_cuda_graph=self.cfg.use_cuda_graph,
+            self_collision_check=self.cfg.self_collision_check,
+            self_collision_opt=self.cfg.self_collision_opt,
             fixed_iters_trajopt=True,
             maximum_trajectory_dt=0.5,
             ik_opt_iters=500,
@@ -153,18 +153,6 @@ class CuroboPlanner:
 
     def _initialize_static_world(self) -> None:
         """Initialize static world geometry from USD stage (only called once)."""
-
-        world_cfg = self._build_world_config_from_stage()
-        self._static_world_config = world_cfg
-        self.motion_gen.update_world(world_cfg)
-        self.invalidate_object_mapping_cache()
-
-    def _build_world_config_from_stage(self) -> WorldConfig:
-        """Build world obstacle config from current USD stage.
-
-        This helper centralizes the "what to include/ignore" policy so both
-        static initialization and runtime refresh use exactly the same rules.
-        """
 
         env_prim_path = f"/World/envs/env_{self._env_id}"
         robot_prim_path = self.cfg.robot_prim_path or f"{env_prim_path}/Robot"
@@ -363,23 +351,11 @@ class CuroboPlanner:
             current_plan = result.get_interpolated_plan()
             motion_plan = current_plan.get_ordered_joint_state(self.target_joint_names)
 
-            # Freeze specified joints: override every timestep with the start value so those
-            # joints remain physically stationary throughout the trajectory.
-            if self.cfg.trajectory_freeze_joints:
-                curobo_q = self._to_curobo_device(current_q)
-                for joint_name in self.cfg.trajectory_freeze_joints:
-                    if joint_name in self.target_joint_names:
-                        idx = list(self.target_joint_names).index(joint_name)
-                        motion_plan.position[:, idx] = curobo_q[idx]
-                    else:
-                        self._logger.warning(f"trajectory_freeze_joints: '{joint_name}' not in planner joints, skipped")
-
             self._logger.debug(f"planning succeeded with {len(motion_plan.position)} waypoints")
             return motion_plan
         else:
             self._logger.warning(f"planning failed: {result.status}")
             return None
-
 
     def plan_motion_batch(
         self,

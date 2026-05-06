@@ -56,6 +56,10 @@ class CuroboPlannerCfg:
     """List of subffixes to only extract world obstacles from."""
     world_ignore_subffixes: list[str] | None = None
     """List of subffixes to ignore when extracting world obstacles."""
+    self_collision_check: bool = True
+    """Whether to check self-collision during planning."""
+    self_collision_opt: bool = True
+    """Whether to optimize away self-collisions during planning."""
 
     # World update strategy
     enable_dynamic_world_sync: bool = False
@@ -66,4 +70,3 @@ class CuroboPlannerCfg:
     """Enable detailed motion planning debug information."""
     cuda_device: int | None = 0
     """Preferred CUDA device index; None uses torch.cuda.current_device() (respects CUDA_VISIBLE_DEVICES)."""
-
