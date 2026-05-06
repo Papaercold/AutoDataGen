@@ -96,6 +96,9 @@ class AutoSimPipeline(ABC):
         # save generated actions
         self._generated_actions = []
 
+        # full-size action buffer (action_space dims), used as base for every step
+        self._last_action = torch.zeros(self._env.action_space.shape, device=self._env.device)
+
         # set the initialized flag
         self._initialized = True
 
@@ -201,15 +204,29 @@ class AutoSimPipeline(ABC):
 
             output = skill.step(world_state)
 
-            action = torch.zeros(self._env.action_space.shape, device=self._env.device)
-            action[self._env_id, :] = self._action_adapter.apply(skill, output, self._env)
+            adapter_result = self._action_adapter.apply(skill, output, self._env)
+            action = self._last_action.clone()
+            action[self._env_id, : adapter_result.shape[0]] = adapter_result
 
             self._env.step(action)
+            self._last_action = action
             self._generated_actions.append(action)
 
             steps += 1
             if output.done:
                 return True, steps
+
+        # Log current and target positions when max_steps reached
+        if steps >= self.cfg.max_steps:
+            world_state = self._build_world_state()
+            current_pos = world_state.robot_base_pose[:2]
+            if goal.target_pose is not None:
+                target_pos = goal.target_pose[:2]
+                dist = float(torch.linalg.norm(current_pos - target_pos))
+                self._logger.warning(
+                    f"Max steps reached. Current pos: ({current_pos[0]:.3f}, {current_pos[1]:.3f}), "
+                    f"Target pos: ({target_pos[0]:.3f}, {target_pos[1]:.3f}), Distance: {dist:.3f}m"
+                )
 
         return False, steps
 
